@@ -1,0 +1,170 @@
+---
+title: "Istanbul Mini Project"
+author: "Can Hakan Dagidir"
+date: '2022'
+output:
+    rmdformats::robobook:
+        number_sections: false
+        df_print: paged
+        code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro
+
+Estimation and Comparison of **Prediction Intervals** using **QRLSTM** and **Historical Forecast Similarity** on Istanbul's Traffic Data.
+
+Evaluation and Comparison of 2 different approaches:
+
+1.  **QRLSTM:**
+    -   Directly estimates wanted **quantiles** with an **LSTM network**.
+
+    -   Called QRLSTM because of the unique **loss function** that is **uneven** weighted
+
+    -   Using the specific quantiles for creating **Prediction Intervals**
+2.  **Forecast Similarity**
+    -   First, makes a **point estimate** of the traffic flow.
+
+    -   Then, uses these estimations as a **time--series** data
+
+    -   Creates **time-windows** of forecast-time-series data
+
+    -   Calculates the **similarity** between different time-windows using **different metrics**
+
+    -   Using **similar time windows** for creating **Prediction Intervals**
+
+## Data
+
+The data provided had many missing instances.
+
+4 different methods for handling missing data (not to be included in this report)
+
+1.  Remove NA
+2.  Using ARIMA for predicting missing data
+3.  Mean of every same hour
+4.  Mean of every same hour of the same day (e.g. Monday 4:00)
+
+## QRLSTM
+
+A peek to the input of LSTM network:
+
+```{r laggedshow, eval=TRUE}
+head(a1)
+```
+
+QRLSTM code:
+
+```{r QRLSTM1, eval=FALSE}
+# tau = 0.05 / data = d1
+qrlstm05_d1 <- keras_model_sequential()
+# LSTM > SOFTMAX > OUTPUT
+qrlstm05_d1 %>%
+    layer_lstm(units = 8, input_shape = c(9,1)) %>%
+    layer_activation_softmax() %>%
+    layer_dense(units = 1)
+# ADAM / LEARNING RATE = 0.001 / QUANTILE(PINBALL) LOSS
+qrlstm05_d1 %>%
+    compile(loss = pinball_loss05,
+            optimizer = optimizer_adam(learning_rate = 0.001),
+            metrics = 'mae')
+# BATCHSIZE = 1 (changing it to 10 might be much much faster with same performance, not sure though)
+fit_qr05_d1 <- qrlstm05_d1 %>% fit(
+    x = t1ax,
+    y = t1ay,
+    batch_size = 1,
+    epochs = 30,
+    verbose = 1,
+    shuffle = FALSE
+)
+
+## tau = 0.95
+qrlstm95_d1 <- keras_model_sequential()
+
+qrlstm95_d1 %>%
+    layer_lstm(units = 8, input_shape = c(9,1)) %>%
+    layer_activation_softmax() %>%
+    layer_dense(units = 1)
+#
+qrlstm95_d1 %>%
+    compile(loss = pinball_loss95,
+            optimizer = optimizer_adam(learning_rate = 0.001),
+            metrics = 'mae')
+
+
+fit_qr95_d1 <- qrlstm95_d1 %>% fit(
+    x = t1ax,
+    y = t1ay,
+    batch_size = 10,
+    epochs = 30,
+    verbose = 1,
+    shuffle = FALSE
+)
+```
+
+```{r plotPI_qrlstm1}
+ggplot(te1all[1:300,]) +
+    geom_line(mapping = aes(x = index, y = flow), color = "black") +
+    geom_line(mapping = aes(x = index, y = upper), color = "blue") +
+    geom_line(mapping = aes(x = index, y = lower), color = "red")
+
+```
+
+We see that model1 covers the flow inside the interval, nicely. However, it sometimes has very big intervals.
+
+```{r plotPI_qrlstm3}
+ggplot(te3all[1:300,]) +
+    geom_line(mapping = aes(x = index, y = flow), color = "black") +
+    geom_line(mapping = aes(x = index, y = upper), color = "blue") +
+    geom_line(mapping = aes(x = index, y = lower), color = "red")
+
+```
+
+In model2, the intervals are smaller compared to model1. However, we see that there are many cases where the flow leaves the interval. Thus we are expecting a bad UC score.
+
+| Data  | Winkler Train | Winkler Test | Unconditional Coverage Train | Unconditional Coverage Test |
+|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
+| Data1 |   0.3182632   |  0.3231521   |          0.9218062           |          0.9144954          |
+| Data2 |   0.2177761   |  0.2219309   |          0.7706763           |          0.7710508          |
+| Data3 |   0.1957726   |  0.1909628   |          0.6790396           |          0.7146834          |
+| Data4 |   0.1928564   |  0.1887284   |          0.6926111           |          0.7174669          |
+
+: Winkler Score and Unconditional Coverage
+
+Smaller winkler score is better
+
+UC should be as close to 0.90 as possible. However we have some weird results here.
+
+## Forecast Similarity
+
+Using point LSTM forecast results, closest 20 neighbors are chosen.
+
+The measuring was euclidean distance on 10 hour time-windows.
+
+The results are as shown:
+
+| Data  | Winkler Score | Unconditional Coverage |
+|:-----:|:-------------:|:----------------------:|
+| Data1 |   0.2419179   |       0.8235727        |
+| Data2 |   0.2218581   |       0.7503492        |
+| Data3 |   0.2319301   |       0.8365922        |
+| Data4 |   0.2305406   |       0.8400838        |
+
+: The Main Table. Comparison of winkler and UC scores.
+
+## Results
+
+| Data  | Winkler - Forecast Similarity | Winkler - QRLSTM | UC - Forecast Similarity |  UC - QRLSTM  |
+|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
+| Data1 |         **0.2419179**         |    0.3929869     |        0.8235727         | **0.9144954** |
+| Data2 |         **0.2218581**         |    0.2660739     |        0.7503492         | **0.7710508** |
+| Data3 |           0.2319301           |  **0.2264859**   |      **0.8365922**       |   0.7146834   |
+| Data4 |           0.2305406           |  **0.2241348**   |      **0.8400838**       |   0.7174669   |
+
+We see mixed results.
+
+**For winkler score:** in first two datasets QRLSTM is significantly worse. In last two datasets QRLSTM performs a little better.
+
+**For UC Coverage:** in first two datasets QRLSTM performs better. However all these results except QRLSTM on Data1 are problematic. Forecast similarity was a hand-made approach, so its UC coverage might be a little off, however QRLSTM's inaccuracy is surprising.

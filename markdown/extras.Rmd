@@ -1,0 +1,268 @@
+---
+title: "Istanbul Extras"
+author: "Can Hakan Dagidir"
+date: '2022'
+output:
+    html_document:
+        theme: yeti
+        highlight: tango
+        toc: true
+        toc_depth: 3
+        toc_float:
+            collapsed: true
+            smooth_scroll: true
+        number_sections: false
+        df_print: paged
+        code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro
+
+Estimation and Comparison of **Prediction Intervals** using **QRLSTM** and **Historical Forecast Similarity** on Istanbul's Traffic Data.
+
+## Methods
+
+We will use 2 different approaches.
+
+1.  **QRLSTM:**
+    -   Directly estimates wanted **quantiles** with an **LSTM network**.
+
+    -   Called QRLSTM because of the unique **loss function** that is **uneven** weighted
+
+    -   Using the specific quantiles for creating **Prediction Intervals**
+2.  **Forecast Similarity**
+    -   First, makes a **point estimate** of the traffic flow.
+
+    -   Then, uses these estimations as a **time--series** data
+
+    -   Creates **time-windows** of forecast-time-series data
+
+    -   Calculates the **similarity** between different time-windows using **different metrics**
+
+    -   Using **similar time windows** for creating **Prediction Intervals**
+
+## Data
+
+The data provided had many missing instances.
+
+4 different methods for handling missing data (not to be included in this report)
+
+1.  Remove NA
+2.  Using ARIMA for predicting missing data
+3.  Mean of every same hour
+4.  Mean of every same hour of the same day (e.g. Monday 4:00)
+
+### Data Prep
+
+1.  Remove outliers:
+    -   Get 0.999th and 0.001th quantile of the data and set the outliers to corresponding quantile values.
+
+```{r, eval=FALSE}
+# Set outliers to the corresponding quantile : 0.999 and 0.001
+upquant = quantile(d1$flow,0.999) # this changes with data: d1>d2=d3=d4 but we use same for all
+downquant = quantile(d1$flow,0.001) # downquant = 12 for all datasets. 10 and 11 will be set to 12.
+
+d1 <- d1 %>% mutate(flow = ifelse(flow > upquant, upquant, ifelse(flow < downquant, downquant ,flow)))
+d2 <- d2 %>% mutate(flow = ifelse(flow > upquant, upquant, ifelse(flow < downquant, downquant ,flow)))
+d3 <- d3 %>% mutate(flow = ifelse(flow > upquant, upquant, ifelse(flow < downquant, downquant ,flow)))
+d4 <- d4 %>% mutate(flow = ifelse(flow > upquant, upquant, ifelse(flow < downquant, downquant ,flow)))
+
+```
+
+2.  Min/Max scaling the data.
+    -   For compatibility with previous Istanbul Project
+
+    -   Code skipped
+3.  A peek at our data:
+
+```{r showdata}
+head(d1)
+plot(ts(d1$flow[1:300]))
+```
+
+4.  Create a lagged data (for LSTM input):
+
+    $$
+    X_{t−169}, X_{t−168}, X_{t−167}, X_{t−25}, X_{t−24}, X_{t−23}, X_{t−2} \text{ and } X_{t−1}
+    $$
+
+```{r laggedfunc, eval=FALSE}
+# custom function: createLagged (can be checked from github)
+a1 = createLagged(data = d1,lags = c(-169:-167, -25:-23, -2:0), other.head = 1)
+```
+
+```{r laggedshow, eval=TRUE}
+head(a1)
+```
+
+4.  Matrix to 3D array transformation (that's how LSTM wants)
+    -   Code skipped
+
+## QRLSTM
+
+We will be using {tensorflow} and {keras} R-packages.
+
+```{r pressure, eval=FALSE}
+library(tensorflow)
+library(keras)
+```
+
+1.  Create a custom quantile loss function:
+    -   Note that: coding of the function is highly likely to be very bad. I am unfamiliar with tensorflow.
+
+```{r pinball, eval=FALSE}
+# tau might be changed to 1-tau. [Not sure]
+pinball_loss <- function(y_pred, y_true, tau) {
+    y_pred = tf$convert_to_tensor(y_pred)
+    y_true = tf$cast(y_true, y_pred$dtype)
+    #
+    tau = tf$expand_dims(tf$cast(tau, y_pred$dtype), as.integer(0))
+    one = tf$cast(1, tau$dtype)
+    #
+    delta_y = y_true - y_pred
+    pinball = tf$math$maximum(tau * delta_y, (tau - one) * delta_y)
+    return(tf$reduce_mean(pinball, axis = as.integer(-1)))
+}
+```
+
+2.  LSTM NETWORK:
+    -   Here is the code for one of the datasets.
+
+```{r QRLSTM1, eval=FALSE}
+# tau = 0.05 / data = d1
+qrlstm05_d1 <- keras_model_sequential()
+# LSTM > SOFTMAX > OUTPUT
+qrlstm05_d1 %>%
+    layer_lstm(units = 8, input_shape = c(9,1)) %>%
+    layer_activation_softmax() %>%
+    layer_dense(units = 1)
+# ADAM / LEARNING RATE = 0.001 / QUANTILE(PINBALL) LOSS
+qrlstm05_d1 %>%
+    compile(loss = pinball_loss05,
+            optimizer = optimizer_adam(learning_rate = 0.001),
+            metrics = 'mae')
+# BATCHSIZE = 1 (changing it to 10 might be much much faster with same performance, not sure though)
+fit_qr05_d1 <- qrlstm05_d1 %>% fit(
+    x = t1ax,
+    y = t1ay,
+    batch_size = 1,
+    epochs = 30,
+    verbose = 1,
+    shuffle = FALSE
+)
+
+## tau = 0.95
+qrlstm95_d1 <- keras_model_sequential()
+
+qrlstm95_d1 %>%
+    layer_lstm(units = 8, input_shape = c(9,1)) %>%
+    layer_activation_softmax() %>%
+    layer_dense(units = 1)
+#
+qrlstm95_d1 %>%
+    compile(loss = pinball_loss95,
+            optimizer = optimizer_adam(learning_rate = 0.001),
+            metrics = 'mae')
+
+
+fit_qr95_d1 <- qrlstm95_d1 %>% fit(
+    x = t1ax,
+    y = t1ay,
+    batch_size = 10,
+    epochs = 30,
+    verbose = 1,
+    shuffle = FALSE
+)
+```
+
+3.  Predict with QRLSTM
+    -   **?** Changing batch_size to 10 didnt make much difference.
+
+```{r predictwithqrlstm, eval = FALSE}
+# changing batch_size to 10 didnt make much difference.
+predtrain05_d1 <- predict(qrlstm05_d1, t1ax, batch_size = 1)
+pred05_d1      <- predict(qrlstm05_d1, te1ax, batch_size = 1)
+predtrain95_d1 <- predict(qrlstm95_d1, t1ax, batch_size = 1)
+pred95_d1      <- predict(qrlstm95_d1, te1ax, batch_size = 1)
+```
+
+
+```{r plotPI_qrlstm1}
+ggplot(te1all[1:300,]) +
+    geom_line(mapping = aes(x = index, y = flow), color = "black") +
+    geom_line(mapping = aes(x = index, y = upper), color = "blue") +
+    geom_line(mapping = aes(x = index, y = lower), color = "red")
+
+```
+
+> We see that model1 covers the flow inside the interval, nicely. However, it sometimes has very big intervals.    
+
+```{r plotPI_qrlstm3}
+ggplot(te3all[1:300,]) +
+    geom_line(mapping = aes(x = index, y = flow), color = "black") +
+    geom_line(mapping = aes(x = index, y = upper), color = "blue") +
+    geom_line(mapping = aes(x = index, y = lower), color = "red")
+
+```
+
+> In model2, the intervals are compaably smaller however, we see that there are many cases where the flow leaves the interval.
+
+### Measuring Performance
+
+| Data  | Winkler Train | Winkler Test | Unconditional Coverage Train | Unconditional Coverage Test |
+|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
+| Data1 |   0.3182632   |  0.3231521   |          0.9218062           |          0.9144954          |
+| Data2 |   0.2177761   |  0.2219309   |          0.7706763           |          0.7710508          |
+| Data3 |   0.1957726   |  0.1909628   |          0.6790396           |          0.7146834          |
+| Data4 |   0.1928564   |  0.1887284   |          0.6926111           |          0.7174669          |
+
+: Winkler Score and Unconditional Coverage
+
+> Smaller winkler score is better
+>
+> UC should be as close to 0.90 as possible. However we have some weird results here.
+
+## Forecast Similarity
+
+As forecasts, we will be using LSTM. Skipping most of that part.
+
+**Results of LSTM:**
+
+We are not interested in LSTM's performance but just to compare with the previous project and check whether the model has a flaw.
+
+Weird Catch: model\$loss is different than hand-calculated loss
+
+| Data  | Model Loss |  Train   |   Test   |
+|:-----:|:----------:|:--------:|:--------:|
+| Data1 |  28.64406  | 28.74575 | 32.26083 |
+| Data2 |  26.01578  | 27.94562 | 28.47678 |
+| Data3 |  26.03706  | 29.0444  | 27.78695 |
+| Data4 |  26.14599  | 26.28531 | 24.08118 |
+
+: LSTM Results
+
+### Finding Closest Neighbors:
+
+1.  Euclidean Distance / Closest 20 Neighbors
+
+| Data  |   Mae    |
+|:-----:|:--------:|
+| Data1 | 31.59523 |
+| Data2 | 28.57183 |
+| Data3 | 28.59466 |
+| Data4 | 28.85006 |
+
+: Another Not useful table. Using LSTM forecasts to fix LSTM results sometimes work (point forecast)
+
+| Data  | Winkler Score | Winkler QRLSTM | Unconditional Coverage | Winkler UC |
+|:-----:|:-------------:|:--------------:|:----------------------:|:----------:|
+| Data1 |   0.2419179   |   0.3929869    |       0.8235727        | 0.9144954  |
+| Data2 |   0.2218581   |   0.2660739    |       0.7503492        | 0.7710508  |
+| Data3 |   0.2319301   |   0.2264859    |       0.8365922        | 0.7146834  |
+| Data4 |   0.2305406   |   0.2241348    |       0.8400838        | 0.7174669  |
+
+: The Main Table. Comparison of winkler and UC scores.
